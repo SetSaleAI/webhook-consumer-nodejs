@@ -35,12 +35,9 @@ async function verifySetSaleWebhook(
   if (!Number.isFinite(timestamp)) return false
   if (Math.abs(Date.now() / 1000 - timestamp) > TOLERANCE_SECONDS) return false
 
-  // Decode the base64 portion after "whsec_".
-  // SetSale uses URL-safe base64 (- and _); atob() requires standard base64 (+ and /).
-  const secretBase64 = (secret.startsWith('whsec_') ? secret.slice(6) : secret)
-    .replace(/-/g, '+')
-    .replace(/_/g, '/')
-  const secretBytes = Uint8Array.from(atob(secretBase64), (c) => c.charCodeAt(0))
+  // SetSale signs with the full secret string (including the "whsec_" prefix)
+  // as the raw UTF-8 HMAC key — the secret is NOT base64-decoded.
+  const secretBytes = new TextEncoder().encode(secret)
 
   const key = await crypto.subtle.importKey(
     'raw',
