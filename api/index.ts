@@ -57,7 +57,7 @@ async function verifySetSaleWebhook(
 }
 
 // ---------------------------------------------------------------------------
-// Webhook payload envelope
+// Webhook payload types
 // ---------------------------------------------------------------------------
 
 interface WebhookPayload<T = unknown> {
@@ -66,6 +66,22 @@ interface WebhookPayload<T = unknown> {
   apiVersion: string
   createdAt: string
   data: T
+}
+
+interface QuoteCreatedData {
+  quote: {
+    id: string
+    type: string
+    status: string
+    customer: {
+      id: string
+      name: string
+      email: string
+    }
+    amount: number
+    url: string
+    createdAt: string
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +113,12 @@ app.post('/webhook', async (c) => {
   console.log('[webhook]', eventType, eventId)
 
   switch (payload.type) {
+    case 'quote.created': {
+      const { quote } = (payload as WebhookPayload<QuoteCreatedData>).data
+      console.log('[quote.created]', JSON.stringify(quote, null, 2))
+      break
+    }
+
     // Add handlers below as your integration grows.
     // case 'order.created':
     //   await handleOrderCreated(payload.data, eventId)
