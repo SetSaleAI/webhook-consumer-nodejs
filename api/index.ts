@@ -3,27 +3,111 @@ import { handle } from 'hono/vercel'
 
 export const config = { runtime: 'edge' }
 
-const app = new Hono().basePath('/api')
+// ---------------------------------------------------------------------------
+// Signature verification
+// ---------------------------------------------------------------------------
 
-app.get('/health', (c) => {
-  return c.json({ status: 'ok' })
-})
+const TOLERANCE_SECONDS = 5 * 60
 
 /**
- * Main webhook endpoint.
- * Vercel delivers the raw request body — read it here and route by event type.
+ * Verifies the `setsale-signature` header using Web Crypto (edge-compatible).
+ *
+ * The secret is expected to be the raw `whsec_<base64>` value from SetSale.
+ * Signature comparison is delegated to `crypto.subtle.verify`, which runs in
+ * constant time to prevent timing attacks.
  */
-app.post('/webhook', async (c) => {
-  const payload = await c.req.json<{ event: string; data?: unknown }>()
+async function verifySetSaleWebhook(
+  rawBody: string,
+  signatureHeader: string,
+  secret: string,
+): Promise<boolean> {
+  // Parse "t=<ts>,v1=<hex>" into a plain object
+  const fields = Object.fromEntries(
+    signatureHeader.split(',').map((part) => {
+      const idx = part.indexOf('=')
+      return [part.slice(0, idx), part.slice(idx + 1)]
+    }),
+  )
 
-  switch (payload.event) {
-    case 'ping':
-      return c.json({ received: true, event: 'ping' })
+  const timestamp = Number(fields['t'])
+  const signatureHex = fields['v1'] ?? ''
+
+  if (!Number.isFinite(timestamp)) return false
+  if (Math.abs(Date.now() / 1000 - timestamp) > TOLERANCE_SECONDS) return false
+
+  // Decode the base64 portion after "whsec_"
+  const secretBase64 = secret.startsWith('whsec_') ? secret.slice(6) : secret
+  const secretBytes = Uint8Array.from(atob(secretBase64), (c) => c.charCodeAt(0))
+
+  const key = await crypto.subtle.importKey(
+    'raw',
+    secretBytes,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['verify'],
+  )
+
+  const message = new TextEncoder().encode(`${fields['t']}.${rawBody}`)
+  const sigBytes = new Uint8Array(
+    (signatureHex.match(/.{2}/g) ?? []).map((b) => parseInt(b, 16)),
+  )
+
+  // constant-time comparison via the Web Crypto API
+  return crypto.subtle.verify('HMAC', key, sigBytes, message)
+}
+
+// ---------------------------------------------------------------------------
+// Webhook payload envelope
+// ---------------------------------------------------------------------------
+
+interface WebhookPayload<T = unknown> {
+  id: string
+  type: string
+  apiVersion: string
+  createdAt: string
+  data: T
+}
+
+// ---------------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------------
+
+const app = new Hono().basePath('/api')
+
+app.get('/health', (c) => c.json({ status: 'ok' }))
+
+app.post('/webhook', async (c) => {
+  // Read the raw body BEFORE any JSON parsing — verification requires the
+  // exact bytes SetSale sent.
+  const rawBody = await c.req.text()
+
+  const sigHeader = c.req.header('setsale-signature') ?? ''
+  const eventId = c.req.header('setsale-event-id') ?? ''
+  const eventType = c.req.header('setsale-event-type') ?? ''
+  const secret = process.env.SETSALE_WEBHOOK_SECRET ?? ''
+
+  const valid = await verifySetSaleWebhook(rawBody, sigHeader, secret)
+  if (!valid) {
+    return c.json({ error: 'invalid signature' }, 401)
+  }
+
+  const payload = JSON.parse(rawBody) as WebhookPayload
+
+  // Use eventId for idempotency — store it in your DB and skip duplicates.
+  console.log('[webhook]', eventType, eventId)
+
+  switch (payload.type) {
+    // Add handlers below as your integration grows.
+    // case 'order.created':
+    //   await handleOrderCreated(payload.data, eventId)
+    //   break
 
     default:
-      console.log('unhandled event', payload.event, payload.data)
-      return c.json({ received: true, event: payload.event })
+      console.log('[webhook] unhandled type', payload.type, payload.data)
   }
+
+  // Any 2xx response within 10 s acknowledges the delivery to SetSale.
+  return c.json({ received: true })
 })
 
 export default handle(app)
