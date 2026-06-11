@@ -61,7 +61,7 @@ All other event types are accepted but only logged as unhandled.
 
 ## Payload shape used today
 
-The typed `quote.created` payload expects:
+SetSale sends `quote.created` payloads shaped like:
 
 ```ts
 {
