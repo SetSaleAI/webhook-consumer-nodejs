@@ -1,46 +1,11 @@
 import { Hono } from 'hono'
 import { handle } from 'hono/vercel'
+import { verifySetSaleWebhook } from '../lib/verify-webhook.js'
 
+// Vercel Edge runtime — Web Crypto and low cold-start latency for webhook ACKs.
 export const config = { runtime: 'edge' }
 
-const TOLERANCE_SECONDS = 5 * 60
-
-async function verifySetSaleWebhook(
-  rawBody: string,
-  signatureHeader: string,
-  secret: string,
-): Promise<boolean> {
-  const fields = Object.fromEntries(
-    signatureHeader.split(',').map((part) => {
-      const idx = part.indexOf('=')
-      return [part.slice(0, idx), part.slice(idx + 1)]
-    }),
-  )
-
-  const timestamp = Number(fields['t'])
-  const signatureHex = fields['v1'] ?? ''
-
-  if (!Number.isFinite(timestamp)) return false
-  if (Math.abs(Date.now() / 1000 - timestamp) > TOLERANCE_SECONDS) return false
-
-  const secretBytes = new TextEncoder().encode(secret)
-
-  const key = await crypto.subtle.importKey(
-    'raw',
-    secretBytes,
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['verify'],
-  )
-
-  const message = new TextEncoder().encode(`${fields['t']}.${rawBody}`)
-  const sigBytes = new Uint8Array(
-    (signatureHex.match(/.{2}/g) ?? []).map((b) => parseInt(b, 16)),
-  )
-
-  return crypto.subtle.verify('HMAC', key, sigBytes, message)
-}
-
+/** Standard SetSale webhook envelope. */
 interface WebhookPayload<T = unknown> {
   id: string
   type: string
@@ -49,6 +14,7 @@ interface WebhookPayload<T = unknown> {
   data: T
 }
 
+/** Payload shape for `quote.created` events. */
 interface QuoteCreatedData {
   quote: {
     id: string
@@ -65,6 +31,7 @@ interface QuoteCreatedData {
   }
 }
 
+// All routes are mounted under /api (see vercel.json rewrite to this file).
 const app = new Hono().basePath('/api')
 
 app.get('/health', (c) => c.json({ status: 'ok' }))
@@ -86,6 +53,7 @@ app.post('/webhook', async (c) => {
 
   const payload = JSON.parse(rawBody) as WebhookPayload
 
+  // Route by event type. Use eventId for idempotency when adding persistence.
   switch (payload.type) {
     case 'quote.created': {
       const { quote } = (payload as WebhookPayload<QuoteCreatedData>).data
